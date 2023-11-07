@@ -1,66 +1,80 @@
-import { DEFAULT_SYSTEM_PROMPT, DEFAULT_TEMPERATURE } from '@/utils/app/const';
-import { OpenAIError, OpenAIStream } from '@/utils/server';
+import { NextApiRequest, NextApiResponse } from 'next';
+import { OpenAIError} from '@/utils/server';
+import OpenAI from 'openai';
 
-import { ChatBody, Message } from '@/types/chat';
 
-// @ts-expect-error
-import wasm from '../../node_modules/@dqbd/tiktoken/lite/tiktoken_bg.wasm?module';
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY
+});
 
-import tiktokenModel from '@dqbd/tiktoken/encoders/cl100k_base.json';
-import { Tiktoken, init } from '@dqbd/tiktoken/lite/init';
+const handler = async (req: NextApiRequest, res: NextApiResponse) => {
+  const userInput = req.body.userInput;
 
-export const config = {
-  runtime: 'edge',
-};
-
-const handler = async (req: Request): Promise<Response> => {
   try {
-    const { model, messages, key, prompt, temperature } = (await req.json()) as ChatBody;
+    const assistant = await openai.beta.assistants.create({
+      name: "Math Tutor",
+      instructions: "You are a personal math tutor. Write and run code to answer math questions.",
+      tools: [{ type: "code_interpreter" }],
+      model: "gpt-4-1106-preview"
+    });
 
-    await init((imports) => WebAssembly.instantiate(wasm, imports));
-    const encoding = new Tiktoken(
-      tiktokenModel.bpe_ranks,
-      tiktokenModel.special_tokens,
-      tiktokenModel.pat_str,
+    const threadParams = {
+      messages: [
+        {
+          content: userInput,
+          role: 'user' as 'user'
+        }
+      ],
+    };
+
+    const thread = await openai.beta.threads.create(threadParams);
+
+    const run = await openai.beta.threads.runs.create(
+      thread.id,
+      {
+        assistant_id: assistant.id,
+        instructions: "Please address the user as Jane Doe. The user has a premium account."
+      }
     );
 
-    let promptToSend = prompt;
-    if (!promptToSend) {
-      promptToSend = DEFAULT_SYSTEM_PROMPT;
-    }
+    let runStatus;
+    do {
+        runStatus = await openai.beta.threads.runs.retrieve(
+             thread.id,
+             run.id
+        );
 
-    let temperatureToUse = temperature;
-    if (temperatureToUse == null) {
-      temperatureToUse = DEFAULT_TEMPERATURE;
-    }
+        console.log(runStatus);
 
-    const prompt_tokens = encoding.encode(promptToSend);
+        if (runStatus.status === 'completed'){
+            break;
+        } else {
+            await new Promise(r => setTimeout(r, 2000));
+        }
+    } while(runStatus.status == "in_progress"); 
 
-    let tokenCount = prompt_tokens.length;
-    let messagesToSend: Message[] = [];
+    const messages12 = await openai.beta.threads.messages.list(
+      thread.id
+    );
+    const assistantMessages = messages12.data.filter(msg => msg.role === 'assistant');
+    let aimessage = '';
+    assistantMessages.forEach(msg => {
+        msg.content.forEach(content => {
+          if (content.type == 'text') {
+            aimessage = content.text.value;
+          }
+        });
+    });
 
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const message = messages[i];
-      const tokens = encoding.encode(message.content);
-
-      if (tokenCount + tokens.length + 1000 > model.tokenLimit) {
-        break;
-      }
-      tokenCount += tokens.length;
-      messagesToSend = [message, ...messagesToSend];
-    }
-
-    encoding.free();
-
-    const stream = await OpenAIStream(model, promptToSend, temperatureToUse, key, messagesToSend);
-
-    return new Response(stream);
+    console.log(aimessage)
+    res.send(aimessage);
+    
   } catch (error) {
     console.error(error);
     if (error instanceof OpenAIError) {
-      return new Response('Error', { status: 500, statusText: error.message });
+      res.status(500).send('Error: ' + error.message);
     } else {
-      return new Response('Error', { status: 500 });
+      res.status(500).send('Error');
     }
   }
 };
